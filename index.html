@@ -1,0 +1,157 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <title>DQ Dashboard (ayer)</title>
+  <script src="https://cdn.plot.ly/plotly-2.35.2.min.js"></script>
+  <style>
+    body{font-family:Inter,system-ui,Arial,sans-serif; margin:20px; color:#0f172a}
+    .grid{display:grid; gap:16px}
+    .cols-3{grid-template-columns:repeat(auto-fit,minmax(300px,1fr))}
+    .card{border:1px solid #e5e7eb; border-radius:12px; padding:14px; box-shadow:0 1px 2px rgba(0,0,0,.04)}
+    label{font-size:12px; color:#475569}
+    select,input{padding:8px; border:1px solid #cbd5e1; border-radius:8px}
+    .row{display:flex; gap:10px; flex-wrap:wrap; align-items:end}
+  </style>
+</head>
+<body>
+  <h1>Data Quality – Ayer</h1>
+  <p>Filtra por <b>Agency</b>, <b>Destination</b>, <b>Condactivación</b> y <b>Días hasta Check-in</b>. Fuente: <i>annotated_yesterday.json</i>.</p>
+
+  <div class="row">
+    <div>
+      <label>Fecha (read-only)</label><br/>
+      <input id="date" type="text" readonly style="background:#f8fafc"/>
+    </div>
+    <div>
+      <label>Agency</label><br/>
+      <select id="agency"></select>
+    </div>
+    <div>
+      <label>Destination</label><br/>
+      <select id="destination"></select>
+    </div>
+    <div>
+      <label>Condactivación</label><br/>
+      <select id="cond"></select>
+    </div>
+    <div>
+      <label>Días hasta Check-in</label><br/>
+      <input id="dias" type="range" min="0" max="0" value="0" step="1" oninput="diasLabel.innerText=this.value"/>
+      <div><small>Seleccionado: <b id="diasLabel">0</b></small></div>
+    </div>
+    <button id="btn" style="padding:10px 14px;border-radius:10px;border:0;background:#111827;color:white">Actualizar</button>
+  </div>
+
+  <div class="grid cols-3" style="margin-top:14px">
+    <div class="card"><div id="bar"></div></div>
+    <div class="card"><div id="pie"></div></div>
+    <div class="card"><div id="domains"></div></div>
+  </div>
+
+<script>
+const PATH = "./data"; // carpeta con meta.json y annotated_yesterday.json
+
+let META = null;
+let ROWS = [];
+
+function pct(n,d){ return d ? Math.round((n/d)*100) : 0; }
+
+async function loadMeta(){
+  const res = await fetch(`${PATH}/meta.json`); META = await res.json();
+  document.getElementById('date').value = META.date || "";
+  const fill = (id, arr) => {
+    const sel = document.getElementById(id);
+    sel.innerHTML = `<option value="ALL">ALL</option>` + (arr||[]).map(v=>`<option>${v}</option>`).join("");
+  };
+  fill('agency', META.agencies);
+  fill('destination', META.destinations);
+  fill('cond', META.conds);
+  const dias = document.getElementById('dias');
+  dias.min = META.dias_min ?? 0;
+  dias.max = META.dias_max ?? 0;
+  dias.value = dias.min ?? 0;
+  document.getElementById('diasLabel').innerText = dias.value;
+}
+
+async function loadRows(){
+  const res = await fetch(`${PATH}/annotated_yesterday.json`);
+  ROWS = await res.json();
+}
+
+function applyFilters(){
+  const ag = document.getElementById('agency').value;
+  const de = document.getElementById('destination').value;
+  const co = document.getElementById('cond').value;
+  const di = document.getElementById('dias').value;
+  return ROWS.filter(r=>{
+    if(ag !== "ALL" && r.agency !== ag) return false;
+    if(de !== "ALL" && r.destination !== de) return false;
+    if(co !== "ALL" && r.condactivacion !== co) return false;
+    if(di !== "" && di !== null){
+      const v = (r.dias_ant_check_in === null) ? null : Number(r.dias_ant_check_in);
+      if(v === null) return false;
+      if(v !== Number(di)) return false; // modo punto exacto
+    }
+    return true;
+  });
+}
+
+function buildSummary(data){
+  const total = data.length;
+  const with_email = data.filter(r=> (r.email_norm||"")!=="").length;
+  const valid = data.filter(r=> r.has_email===1 && r.valid_format===1).length;
+  const unique = data.filter(r=> r.has_email===1 && r.valid_format===1 && r.is_duplicate===0).length;
+  const dups = data.filter(r=> r.is_duplicate===1).length;
+  const reasons = { ok:0, empty:0, invalid_format:0, duplicate:0 };
+  for(const r of data){ reasons[r.dq_reason] = (reasons[r.dq_reason]||0)+1; }
+  const okRows = data.filter(r=> r.dq_reason==='ok');
+  const topMap = {};
+  for(const r of okRows){
+    const k = r.email_domain || '(vacío)';
+    topMap[k] = (topMap[k]||0)+1;
+  }
+  const topDomains = Object.entries(topMap).sort((a,b)=>b[1]-a[1]).slice(0,10)
+        .map(([email_domain,c])=>({email_domain, c}));
+
+  return { total, with_email, valid, unique, dups, sendable: unique, reasons, topDomains };
+}
+
+function draw(summary){
+  // Barras
+  const x = ['Total','Con email','Válidos','Únicos','Enviables'];
+  const y = [summary.total, summary.with_email, summary.valid, summary.unique, summary.sendable];
+  Plotly.newPlot('bar', [{type:'bar', x, y, text:y, textposition:'auto'}],
+    {title:'Volumen (ayer)', margin:{t:40}});
+
+  // Pie
+  const order = ['ok','empty','invalid_format','duplicate'];
+  const labels = [], vals=[];
+  for(const k of order){ labels.push(k); vals.push(summary.reasons[k]||0); }
+  Plotly.newPlot('pie', [{type:'pie', labels, values: vals, textinfo:'label+percent'}],
+    {title:'Distribución por razón DQ (ayer)', margin:{t:40}});
+
+  // Top dominios
+  const dl = summary.topDomains.map(d=>d.email_domain);
+  const dv = summary.topDomains.map(d=>d.c);
+  Plotly.newPlot('domains', [{type:'bar', x:dl, y:dv, text:dv, textposition:'auto'}],
+    {title:'Top dominios (enviables)', margin:{t:40, b:80}, xaxis:{tickangle:-30}});
+}
+
+document.getElementById('btn').addEventListener('click', ()=>{
+  const data = applyFilters();
+  const summary = buildSummary(data);
+  draw(summary);
+});
+
+(async function init(){
+  await loadMeta();
+  await loadRows();
+  const data = applyFilters();
+  const summary = buildSummary(data);
+  draw(summary);
+})();
+</script>
+</body>
+</html>
